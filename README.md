@@ -125,7 +125,7 @@ Notifications may be coalesced, and paths can change again before events are con
 From the repository root:
 
 ```sh
-just ecosystem-test notify
+(cd ../verification && just ecosystem-test notify)
 ```
 
 The independent consumer preserves the complete former compiler regression
