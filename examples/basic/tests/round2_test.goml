@@ -1,0 +1,31 @@
+package tests;
+
+use ecosystem::notify;
+use std::fs;
+use std::panic;
+use std::testing;
+
+#[go_ffi("os", "Getpid")]
+extern fn process_id() -> isize;
+
+#[test]
+fn failed_recursive_registration_can_be_retried_downstream() -> () {
+    let root = "/tmp/notify-round2-downstream-" + process_id().to_string();
+    let _ = fs::remove_dir_all(root);
+    testing::assert_ok(fs::create_dir(root));
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    testing::assert_ok(fs::create_dir(root + "/child"));
+    let watches = notify::WatchSet::new();
+    defer {
+        let _ = watches.close();
+    };
+    let options = notify::Options::new().with_recursive(true).with_ignore(
+        |_, _| panic::raise("predicate"),
+    );
+    testing::assert_err(panic::catch(|| watches.add_with(root, options)));
+    testing::assert_eq(testing::expect_ok(watches.watches(), "empty registrations").len(), 0);
+    testing::assert_ok(watches.add(root));
+    testing::assert_eq(testing::expect_ok(watches.watches(), "one registration").len(), 1);
+}

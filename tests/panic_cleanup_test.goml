@@ -1,0 +1,80 @@
+package tests;
+
+use ecosystem::notify;
+use std::fs;
+use std::os::linux::fd;
+use std::panic;
+use std::task;
+use std::testing;
+use std::utf8;
+
+fn inotify_descriptors() -> isize {
+    let mut count = 0;
+    for name in testing::expect_ok(fs::read_dir("/proc/self/fd"), "descriptors") {
+        if let Ok(value) = fd::readlink_at(fd::AT_FDCWD, "/proc/self/fd/" + name) {
+            if utf8::decode(value).unwrap_or("").contains("inotify") {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn registration_panic_does_not_leak_inotify_instances_or_set_state() -> () {
+    let root = directory("register-panic");
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    testing::assert_ok(fs::create_dir(root + "/child"));
+    let options = notify::Options::new().with_recursive(true).with_ignore(
+        |_, _| panic::raise("registration predicate"),
+    );
+    let before = inotify_descriptors();
+    for _ in 0..5 {
+        testing::assert_err(panic::catch(|| notify::watch_with(root, options)));
+        testing::assert_eq(inotify_descriptors(), before);
+    }
+    let watches = notify::WatchSet::new();
+    testing::assert_err(panic::catch(|| watches.add_with(root, options)));
+    testing::assert_eq(testing::expect_ok(watches.watches(), "registrations").len(), 0);
+    testing::assert_eq(inotify_descriptors(), before);
+    testing::assert_ok(watches.add(root));
+    testing::assert_ok(watches.close());
+}
+
+#[test]
+fn subscription_worker_panic_closes_owned_watcher_and_watch_set() -> () {
+    let root = directory("subscription-panic");
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    let options = notify::Options::new().with_ignore(|_, _| panic::raise("subscription predicate"));
+    let watcher = testing::expect_ok(notify::watch_with(root, options), "watcher");
+    let result = panic::catch(
+        || task::scope(
+            |scope| {
+                let subscription = testing::expect_ok(watcher.subscribe(scope, 0), "subscription");
+                write(root + "/first");
+                testing::assert_none(subscription.events().recv());
+            },
+        ),
+    );
+    testing::assert_err(result);
+    testing::assert(watcher.is_closed());
+    testing::assert_ok(watcher.close());
+    let watches = notify::WatchSet::new();
+    testing::assert_ok(watches.add_with(root, options));
+    let result = panic::catch(
+        || task::scope(
+            |scope| {
+                let subscription = testing::expect_ok(watches.subscribe(scope, 0), "subscription");
+                write(root + "/second");
+                testing::assert_none(subscription.events().recv());
+            },
+        ),
+    );
+    testing::assert_err(result);
+    testing::assert(watches.is_closed());
+    testing::assert_ok(watches.close());
+}
