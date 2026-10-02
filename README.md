@@ -120,6 +120,14 @@ Inotify does not provide an atomic recursive subscription. Files may change befo
 
 Notifications may be coalesced, and paths can change again before events are consumed; they are not an audit log. Non-UTF-8 event names produce `InvalidData` rather than replacement characters, consistent with the standard library's UTF-8 path API. Network-filesystem remote changes, mounts placed over watched paths, and memory-mapped writes have the underlying [inotify limitations](https://man7.org/linux/man-pages/man7/inotify.7.html). This API uses ordinary imports, structs, functions, and methods; no grammar changes are introduced.
 
+Cancellable reads on both `Watcher` and `WatchSet` also observe cancellation
+while waiting for another operation to release the state lock. Cancellation is
+checked again after each read/poll step, so an elapsed timeout cannot turn an
+already observed cancellation into a completed empty batch. Kernel polling is
+still bounded to 50 ms per step; user ignore callbacks must return to allow
+cancellation of an operation already executing them. A cancelled read may have
+drained a racing event batch; callers should rescan when abandoning a read.
+
 ## Validation
 
 From the repository root:

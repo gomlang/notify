@@ -122,26 +122,7 @@ impl WatchSet {
     pub fn try_read(self: WatchSet) -> Result[Vec[Notice], fs::Error] {
         let state = self.state.recv().ok_or(closed())?;
         defer self.state.send(state);
-        require_set_open(state)?;
-        let result = Vec::new();
-        for (id, registration) in state.registrations.entries() {
-            match read_batch(registration.state) {
-                Ok(events) => {
-                    for event in events {
-                        result.push(Notice::Event(id, event));
-                    }
-                },
-                Err(error) => {
-                    result.push(Notice::Error(id, error));
-                    let _ = close_state(registration.state);
-                },
-            }
-            if registration.state.fd.get().is_none() {
-                state.registrations.remove(id);
-                result.push(Notice::Removed(id));
-            }
-        }
-        Result::Ok(result)
+        read_set(state)
     }
 
     pub fn read(self: WatchSet, timeout: time::Duration) -> Result[Vec[Notice], fs::Error] {
@@ -168,22 +149,22 @@ impl WatchSet {
         task::WaitResult[Vec[Notice]],
         fs::Error,
     ] {
-        let started = time::Instant::now();
-        loop {
-            if cancel.is_cancelled() {
-                return Result::Ok(task::WaitResult::Cancelled);
-            }
-            let remaining = timeout.saturating_subtract(started.elapsed());
-            let interval = if remaining.as_milliseconds() > 50 {
-                time::Duration::from_milliseconds(50)
-            } else {
-                remaining
-            };
-            let events = self.read(interval)?;
-            if !events.is_empty() || started.elapsed().compare(timeout) >= 0 {
-                return Result::Ok(task::WaitResult::Completed(events));
-            }
-        }
+        read_with_state(
+            self.state,
+            cancel,
+            timeout,
+            read_set,
+            |state, milliseconds| {
+                require_set_open(state)?;
+                let fds = Vec::new();
+                for (_, registration) in state.registrations.entries() {
+                    if let Some(fd) = registration.state.fd.get() {
+                        fds.push(fd);
+                    }
+                }
+                poll_fds(fds, milliseconds)
+            },
+        )
     }
 
     fn wait(self: WatchSet, milliseconds: usize) -> Result[(), fs::Error] {
@@ -256,4 +237,27 @@ fn require_set_open(state: SetState) -> Result[(), fs::Error] {
     } else {
         Result::Ok(())
     }
+}
+
+fn read_set(state: SetState) -> Result[Vec[Notice], fs::Error] {
+    require_set_open(state)?;
+    let result = Vec::new();
+    for (id, registration) in state.registrations.entries() {
+        match read_batch(registration.state) {
+            Ok(events) => {
+                for event in events {
+                    result.push(Notice::Event(id, event));
+                }
+            },
+            Err(error) => {
+                result.push(Notice::Error(id, error));
+                let _ = close_state(registration.state);
+            },
+        }
+        if registration.state.fd.get().is_none() {
+            state.registrations.remove(id);
+            result.push(Notice::Removed(id));
+        }
+    }
+    Result::Ok(result)
 }

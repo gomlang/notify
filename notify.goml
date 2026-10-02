@@ -129,22 +129,29 @@ impl Watcher {
         task::WaitResult[Vec[Event]],
         fs::Error,
     ] {
-        let started = time::Instant::now();
-        loop {
-            if cancel.is_cancelled() {
-                return Result::Ok(task::WaitResult::Cancelled);
-            }
-            let remaining = timeout.saturating_subtract(started.elapsed());
-            let interval = if remaining.as_milliseconds() > 50 {
-                time::Duration::from_milliseconds(50)
-            } else {
-                remaining
-            };
-            let events = self.read(interval)?;
-            if events.len() > 0 || started.elapsed().compare(timeout) >= 0 {
-                return Result::Ok(task::WaitResult::Completed(events));
-            }
-        }
+        read_with_state(
+            self.state,
+            cancel,
+            timeout,
+            |state| {
+                match read_batch(state) {
+                    Ok(events) => Result::Ok(events),
+                    Err(error) => {
+                        let _ = close_state(state);
+                        Result::Err(error)
+                    },
+                }
+            },
+            |state, milliseconds| {
+                match poll(state, milliseconds) {
+                    Ok(()) => Result::Ok(()),
+                    Err(error) => {
+                        let _ = close_state(state);
+                        Result::Err(error)
+                    },
+                }
+            },
+        )
     }
 
     pub fn is_closed(self: Watcher) -> bool {
@@ -192,4 +199,61 @@ fn closed() -> fs::Error {
 
 fn error(kind: io::ErrorKind, message: string) -> fs::Error {
     fs::Error::new(kind, "filesystem notification", Option::None, Option::None, message)
+}
+
+fn read_with_state[S, T](
+    gate: Channel[S],
+    cancel: task::CancelToken,
+    timeout: time::Duration,
+    read: (S) -> Result[Vec[T], fs::Error],
+    wait: (S, usize) -> Result[(), fs::Error],
+) -> Result[task::WaitResult[Vec[T]], fs::Error] {
+    let started = time::Instant::now();
+    loop {
+        if cancel.is_cancelled() {
+            return Result::Ok(task::WaitResult::Cancelled)
+        }
+        let state = select {
+            recv(cancel.done()) as _ => return Result::Ok(task::WaitResult::Cancelled),
+            recv(gate) as state => state.ok_or(closed())?,
+        };
+        let result = read_step(gate, state, cancel, started, timeout, read, wait);
+        if cancel.is_cancelled() {
+            return Result::Ok(task::WaitResult::Cancelled)
+        }
+        let events = result?;
+        if !events.is_empty() || started.elapsed().compare(timeout) >= 0 {
+            return Result::Ok(task::WaitResult::Completed(events))
+        }
+    }
+}
+
+fn read_step[S, T](
+    gate: Channel[S],
+    state: S,
+    cancel: task::CancelToken,
+    started: time::Instant,
+    timeout: time::Duration,
+    read: (S) -> Result[Vec[T], fs::Error],
+    wait: (S, usize) -> Result[(), fs::Error],
+) -> Result[Vec[T], fs::Error] {
+    defer gate.send(state);
+    if cancel.is_cancelled() {
+        return Result::Ok(Vec::new())
+    }
+    let events = read(state)?;
+    let remaining = timeout.saturating_subtract(started.elapsed());
+    if events.is_empty() && !remaining.is_zero() && !cancel.is_cancelled() {
+        let milliseconds = if remaining.as_nanoseconds() >= 50000000 {
+            50
+        } else {
+            (remaining.as_nanoseconds() + 999999) / 1000000
+        };
+        wait(state, milliseconds.to_usize())?;
+        if cancel.is_cancelled() {
+            return Result::Ok(Vec::new())
+        }
+        return read(state)
+    }
+    Result::Ok(events)
 }
