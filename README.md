@@ -128,6 +128,13 @@ still bounded to 50 ms per step; user ignore callbacks must return to allow
 cancellation of an operation already executing them. A cancelled read may have
 drained a racing event batch; callers should rescan when abandoning a read.
 
+Panics from ignore callbacks propagate. During recursive registration, unwinding
+closes the newly allocated inotify instance. After a subscription takes ownership,
+its worker closes the watcher/watch set on panic as well as ordinary completion,
+then closes the output channel. Cleanup is attempted exactly once by that worker;
+a cleanup panic may replace the original panic, and no recovery is provided.
+Synchronous reads without a subscription still leave ownership with the caller.
+
 ## Validation
 
 From the repository root:

@@ -73,10 +73,14 @@ fn open_state(root: string, options: Options) -> Result[State, fs::Error] {
         rescan: Ref::new(false),
         close_requested: Ref::new(false),
     };
-    if let Err(error) = add_tree(state, absolute, true) {
-        let _ = close_state(state);
-        return Result::Err(error);
-    }
+    let retained = Ref::new(false);
+    defer {
+        if !retained.get() {
+            let _ = close_state(state);
+        }
+    };
+    add_tree(state, absolute, true)?;
+    retained.set(true);
     Result::Ok(state)
 }
 

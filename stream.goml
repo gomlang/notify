@@ -62,6 +62,12 @@ fn subscribe_source[T](
     let worker = scope.try_spawn(
         |cancel: task::CancelToken| {
             defer output.close();
+            let completed = Ref::new(false);
+            defer {
+                if !completed.get() {
+                    let _ = close();
+                }
+            };
             loop {
                 if stop_requested(stop, cancel, source_closed) {
                     break;
@@ -86,6 +92,7 @@ fn subscribe_source[T](
                     break;
                 }
             }
+            completed.set(true);
             close()
         },
     ).ok_or(error(io::ErrorKind::Interrupted, "subscription scope is cancelled"))?;
