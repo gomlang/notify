@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    uses: gomlang/verification/.github/workflows/ecosystem-ci.yml@9006609a2d1a2ff90fd7e7479c5ed7af6769dd20
+    with:
+      module: notify
+      verification-ref: 9006609a2d1a2ff90fd7e7479c5ed7af6769dd20
