@@ -1,6 +1,6 @@
 package tests;
 
-use consumer::notify as app;
+use ecosystem::notify::examples::basic as app;
 
 #[test]
 fn migrated_filesystem_behavior_remains_compatible() -> () {

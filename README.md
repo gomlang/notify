@@ -128,10 +128,11 @@ From the repository root:
 (cd ../verification && just ecosystem-test notify)
 ```
 
-The independent consumer preserves the complete former compiler regression
-fixture and exercises the package through a normal versioned dependency. The module retains all 22 original internal tests and adds 8 public-API
+The `examples/basic` example preserves the complete former compiler regression
+fixture and exercises the public API. `goml verify` also tests it through an
+isolated registry snapshot. The module retains all 22 original internal tests and adds 8 public-API
 tests for filesystem boundaries and resource lifecycle. The GoML verifier compiles
-the generated library and consumer test runners with Go's race detector and runs
+the generated library and example test runners with Go's race detector and runs
 the same real-filesystem cases. Tests create unique temporary directories and
 remove them after each run; no external service or privileged mount is required.
 
@@ -139,3 +140,15 @@ Coverage includes real inotify queue overflow and rebuild, cross-batch rename
 cookies, recursive move-in/out and ignored subtree maintenance, malformed record
 decoding, raw non-UTF-8 filenames, cancellable reads, unbuffered subscription
 backpressure, concurrent close and descriptor release.
+
+## Development and examples
+
+Requires GoML 0.1.55 or newer. The `examples/basic/` example shares the root manifest and its dependencies. From the library root, run:
+
+```sh
+goml run --example basic
+goml test
+goml verify --timeout 300s
+```
+
+`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test notify)` also retains the library-specific smoke and compatibility checks.

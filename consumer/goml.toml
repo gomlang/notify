@@ -1,5 +1,0 @@
-[module]
-path = "consumer::notify"
-
-[dependencies]
-"ecosystem::notify" = "0.1.0"
