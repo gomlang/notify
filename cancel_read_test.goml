@@ -1,0 +1,120 @@
+package notify;
+
+use std::task;
+use std::testing;
+use std::time;
+
+#[test]
+fn watcher_read_cancellation_does_not_wait_for_state_lock() -> () {
+    let watcher = Watcher { state: Channel::new(1), stop: Channel::new(0) };
+    task::scope(
+        |workers| {
+            task::scope(
+                |cancelled| {
+                    let started = Channel::new(1);
+                    let waiting = workers.spawn(
+                        |_| {
+                            started.send(());
+                            watcher.read_with(cancelled.token(), time::Duration::from_seconds(5))
+                        },
+                    );
+                    let _ = started.recv();
+                    cancelled.cancel();
+                    let timer = time::Timer::new(time::Duration::from_seconds(2));
+                    defer {
+                        let _ = timer.stop();
+                    };
+                    let completed = select {
+                        recv(waiting.done()) as _ => true,
+                        recv(timer.done()) as _ => false,
+                    };
+                    if !completed {
+                        watcher.state.close();
+                    }
+                    let result = waiting.join();
+                    testing::assert(completed);
+                    match testing::expect_ok(result, "cancel lock admission") {
+                        task::WaitResult::Cancelled => (),
+                        task::WaitResult::Completed(_) => testing::fail(
+                            "cancelled read returned events",
+                        ),
+                    }
+                },
+            );
+        },
+    );
+}
+
+#[test]
+fn watch_set_read_cancellation_does_not_wait_for_state_lock() -> () {
+    let watches = WatchSet::new();
+    let state = testing::expect_some(watches.state.recv(), "hold state");
+    task::scope(
+        |workers| {
+            task::scope(
+                |cancelled| {
+                    let started = Channel::new(1);
+                    let waiting = workers.spawn(
+                        |_| {
+                            started.send(());
+                            watches.read_with(cancelled.token(), time::Duration::from_seconds(5))
+                        },
+                    );
+                    let _ = started.recv();
+                    cancelled.cancel();
+                    let timer = time::Timer::new(time::Duration::from_seconds(2));
+                    defer {
+                        let _ = timer.stop();
+                    };
+                    let completed = select {
+                        recv(waiting.done()) as _ => true,
+                        recv(timer.done()) as _ => false,
+                    };
+                    watches.state.send(state);
+                    let result = waiting.join();
+                    testing::assert(completed);
+                    match testing::expect_ok(result, "cancel set admission") {
+                        task::WaitResult::Cancelled => (),
+                        task::WaitResult::Completed(_) => testing::fail(
+                            "cancelled read returned events",
+                        ),
+                    }
+                },
+            );
+        },
+    );
+    testing::assert_ok(watches.close());
+}
+
+#[test]
+fn poll_readiness_is_drained_in_the_same_step() -> () {
+    task::scope(
+        |scope| {
+            let gate: Channel[()] = Channel::new(1);
+            let ready = Ref::new(false);
+            let events = testing::expect_ok(
+                read_step(
+                    gate,
+                    (),
+                    scope.token(),
+                    time::Instant::now(),
+                    time::Duration::from_seconds(5),
+                    |_| Result::Ok(
+                        if ready.get() {
+                            Vec::from_array([7])
+                        } else {
+                            Vec::new()
+                        },
+                    ),
+                    |_, _| {
+                        ready.set(true);
+                        Result::Ok(())
+                    },
+                ),
+                "ready after poll",
+            );
+            testing::assert(events == Vec::from_array([7]));
+            testing::assert_some(gate.recv());
+        },
+    );
+}

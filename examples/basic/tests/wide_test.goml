@@ -1,0 +1,25 @@
+package tests;
+
+use ecosystem::notify;
+use std::task;
+use std::testing;
+use std::time;
+
+#[test]
+fn cancelled_watch_set_read_preserves_registration_lifecycle() -> () {
+    let watches = notify::WatchSet::new();
+    task::scope(
+        |scope| {
+            scope.cancel();
+            match testing::expect_ok(
+                watches.read_with(scope.token(), time::Duration::from_seconds(1)),
+                "read",
+            ) {
+                task::WaitResult::Cancelled => (),
+                task::WaitResult::Completed(_) => testing::fail("expected cancellation"),
+            }
+        },
+    );
+    testing::assert(!watches.is_closed());
+    testing::assert_ok(watches.close());
+}

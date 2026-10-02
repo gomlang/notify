@@ -1,0 +1,102 @@
+package tests;
+
+use ecosystem::notify;
+use std::fs;
+use std::task;
+use std::panic;
+use std::testing;
+use std::time;
+
+#[test]
+fn cancellation_from_ignore_callback_prevents_completed_batch() -> () {
+    let root = directory("callback-cancel");
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    task::scope(
+        |scope| {
+            let watcher = testing::expect_ok(
+                notify::watch_with(
+                    root,
+                    notify::Options::new().with_ignore(
+                        |_, _| {
+                            scope.cancel();
+                            false
+                        },
+                    ),
+                ),
+                "watcher",
+            );
+            defer {
+                let _ = watcher.close();
+            };
+            write(root + "/first");
+            match testing::expect_ok(
+                watcher.read_with(scope.token(), time::Duration::from_seconds(2)),
+                "cancel read",
+            ) {
+                task::WaitResult::Cancelled => (),
+                task::WaitResult::Completed(_) => testing::fail(
+                    "callback cancelled read returned a batch",
+                ),
+            }
+            testing::assert(!watcher.is_closed());
+        },
+    );
+    task::scope(
+        |scope| {
+            let watches = notify::WatchSet::new();
+            defer {
+                let _ = watches.close();
+            };
+            testing::assert_ok(
+                watches.add_with(
+                    root,
+                    notify::Options::new().with_ignore(
+                        |_, _| {
+                            scope.cancel();
+                            false
+                        },
+                    ),
+                ),
+            );
+            write(root + "/second");
+            match testing::expect_ok(
+                watches.read_with(scope.token(), time::Duration::from_seconds(2)),
+                "cancel set read",
+            ) {
+                task::WaitResult::Cancelled => (),
+                task::WaitResult::Completed(_) => testing::fail(
+                    "callback cancelled set returned a batch",
+                ),
+            }
+            testing::assert(!watches.is_closed());
+        },
+    );
+}
+
+#[test]
+fn panicking_ignore_callback_releases_cancellable_reader_state_lock() -> () {
+    let root = directory("callback-panic");
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    let watcher = testing::expect_ok(
+        notify::watch_with(
+            root,
+            notify::Options::new().with_ignore(|_, _| panic::raise("ignore panic")),
+        ),
+        "watcher",
+    );
+    task::scope(
+        |scope| {
+            write(root + "/file");
+            let result = panic::catch(
+                || watcher.read_with(scope.token(), time::Duration::from_seconds(1)),
+            );
+            testing::assert(result.is_err());
+            testing::assert(!watcher.is_closed());
+            testing::assert_ok(watcher.close());
+        },
+    );
+}
