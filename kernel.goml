@@ -145,7 +145,24 @@ fn poll(state: State, milliseconds: usize) -> Result[(), fs::Error] {
 }
 
 fn poll_fds(fds: Vec[usize], milliseconds: usize) -> Result[(), fs::Error] {
-    let data = zeroes(fds.len() * 8);
+    let data = Vec::new();
+    poll_into(fds, milliseconds, data)?;
+    for index in 0..fds.len() {
+        if data[index * 8 + 6] & 0x38 != 0 {
+            return Result::Err(poll_error());
+        }
+    }
+    Result::Ok(())
+}
+
+fn poll_error() -> fs::Error {
+    error(io::ErrorKind::Other, "inotify descriptor failed while polling")
+}
+
+fn poll_into(fds: Vec[usize], milliseconds: usize, data: Vec[byte]) -> Result[(), fs::Error] {
+    while data.len() < fds.len() * 8 {
+        data.push(0);
+    }
     for index in 0..fds.len() {
         endian::write_i32(
             data.as_mut_slice(),
@@ -154,6 +171,9 @@ fn poll_fds(fds: Vec[usize], milliseconds: usize) -> Result[(), fs::Error] {
             endian::Endian::Little,
         ).map_err(|value| error(io::ErrorKind::InvalidData, value.to_string()))?;
         data[index * 8 + 4] = 1;
+        data[index * 8 + 5] = 0;
+        data[index * 8 + 6] = 0;
+        data[index * 8 + 7] = 0;
     }
     let result = supported(
         syscall::syscall6_with_buffers(
@@ -170,13 +190,6 @@ fn poll_fds(fds: Vec[usize], milliseconds: usize) -> Result[(), fs::Error] {
     )?;
     if result.errno != syscall::EINTR {
         checked(result, "poll", Option::None)?;
-    }
-    for index in 0..fds.len() {
-        if data[index * 8 + 6] & 0x38 != 0 {
-            return Result::Err(
-                error(io::ErrorKind::Other, "inotify descriptor failed while polling"),
-            );
-        }
     }
     Result::Ok(())
 }

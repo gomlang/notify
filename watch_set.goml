@@ -56,6 +56,8 @@ struct SetState {
     closed: Ref[bool],
     next: Ref[u64],
     registrations: HashMap[WatchId, Registration],
+    pending: Ref[Option[Vec[Notice]]],
+    poll_buffer: Vec[byte],
 }
 
 pub struct WatchSet {
@@ -67,7 +69,13 @@ impl WatchSet {
     pub fn new() -> WatchSet {
         let state = Channel::new(1);
         state.send(
-            SetState { closed: Ref::new(false), next: Ref::new(1), registrations: HashMap::new() },
+            SetState {
+                closed: Ref::new(false),
+                next: Ref::new(1),
+                registrations: HashMap::new(),
+                pending: Ref::new(Option::None),
+                poll_buffer: Vec::new(),
+            },
         );
         WatchSet { state, stop: Channel::new(0) }
     }
@@ -154,30 +162,15 @@ impl WatchSet {
             cancel,
             timeout,
             read_set,
-            |state, milliseconds| {
-                require_set_open(state)?;
-                let fds = Vec::new();
-                for (_, registration) in state.registrations.entries() {
-                    if let Some(fd) = registration.state.fd.get() {
-                        fds.push(fd);
-                    }
-                }
-                poll_fds(fds, milliseconds)
-            },
+            wait_set,
+            |state, events| state.pending.set(Option::Some(events)),
         )
     }
 
     fn wait(self: WatchSet, milliseconds: usize) -> Result[(), fs::Error] {
         let state = self.state.recv().ok_or(closed())?;
         defer self.state.send(state);
-        require_set_open(state)?;
-        let fds = Vec::new();
-        for (_, registration) in state.registrations.entries() {
-            if let Some(fd) = registration.state.fd.get() {
-                fds.push(fd);
-            }
-        }
-        poll_fds(fds, milliseconds)
+        wait_set(state, milliseconds)
     }
 
     pub fn is_closed(self: WatchSet) -> bool {
@@ -215,6 +208,7 @@ impl WatchSet {
             state.closed.set(true);
             self.stop.close();
         }
+        state.pending.set(Option::None);
         let mut first = Option::None;
         for (id, registration) in state.registrations.entries() {
             if let Err(error) = close_state(registration.state) {
@@ -241,14 +235,29 @@ fn require_set_open(state: SetState) -> Result[(), fs::Error] {
 
 fn read_set(state: SetState) -> Result[Vec[Notice], fs::Error] {
     require_set_open(state)?;
+    if let Some(events) = state.pending.get() {
+        state.pending.set(Option::None);
+        return Result::Ok(events);
+    }
     let result = Vec::new();
-    for (id, registration) in state.registrations.entries() {
-        match read_batch(registration.state) {
-            Ok(events) => {
+    let registrations = state.registrations.entries();
+    if registrations.len() > 1 {
+        poll_into(registration_fds(registrations), 0, state.poll_buffer)?;
+    }
+    for index in 0..registrations.len() {
+        let (id, registration) = registrations[index];
+        let batch = if registrations.len() > 1 {
+            read_ready(registration.state, state.poll_buffer[index * 8 + 6])
+        } else {
+            read_batch(registration.state).map(|events| Option::Some(events))
+        };
+        match batch {
+            Ok(Some(events)) => {
                 for event in events {
                     result.push(Notice::Event(id, event));
                 }
             },
+            Ok(None) => (),
             Err(error) => {
                 result.push(Notice::Error(id, error));
                 let _ = close_state(registration.state);
@@ -260,4 +269,33 @@ fn read_set(state: SetState) -> Result[Vec[Notice], fs::Error] {
         }
     }
     Result::Ok(result)
+}
+
+fn registration_fds(registrations: Vec[(WatchId, Registration)]) -> Vec[usize] {
+    let fds = Vec::new();
+    for (_, registration) in registrations {
+        // poll ignores negative descriptors; retain each registration's array position.
+        fds.push(registration.state.fd.get().unwrap_or((-1).to_usize()));
+    }
+    fds
+}
+
+fn wait_set(state: SetState, milliseconds: usize) -> Result[(), fs::Error] {
+    require_set_open(state)?;
+    // Per-descriptor failures are reported by read_set as Error/Removed notices.
+    poll_into(registration_fds(state.registrations.entries()), milliseconds, state.poll_buffer)
+}
+
+fn read_ready(state: State, revents: byte) -> Result[Option[Vec[Event]], fs::Error] {
+    if revents & 0x38 != 0 {
+        return Result::Err(poll_error());
+    }
+    if revents & 1 != 0 || state.pending.get().is_some() || state.rescan.get()
+        || state.fd.get().is_none() {
+        return read_batch(state).map(|events| Option::Some(events));
+    }
+    if state.moves.len() > 0 {
+        expire_moves(state)?;
+    }
+    Result::Ok(Option::None)
 }

@@ -1,0 +1,54 @@
+package main;
+
+use ecosystem::notify;
+use std::fs;
+use std::testing;
+use std::time;
+
+// Run with: goml run --example watch_set_bench
+// Timings exclude registration and filesystem setup. No timing threshold is asserted.
+
+fn main() -> () {
+    let root = "/tmp/goml-notify-bench-" + time::SystemTime::now().unix_nanoseconds().to_string();
+    testing::assert_ok(fs::create_dir(root));
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    for count in Vec::from_array([1, 16, 64]) {
+        measure(root, count);
+    }
+}
+
+fn measure(root: string, count: isize) -> () {
+    let set = notify::WatchSet::new();
+    defer {
+        let _ = set.close();
+    };
+    for index in 0..count {
+        let directory = root + "/" + index.to_string();
+        testing::assert_ok(fs::create_dir_all(directory));
+        testing::assert_ok(set.add(directory));
+    }
+    let rounds = 2000;
+    let started = time::Instant::now();
+    for _ in 0..rounds {
+        testing::assert(testing::expect_ok(set.try_read(), "idle read").is_empty());
+    }
+    println(
+        count.to_string() + " roots: idle "
+            + (started.elapsed().as_nanoseconds() / rounds.to_i64()).to_string()
+            + " ns/read",
+    );
+    let started = time::Instant::now();
+    for index in 0..100 {
+        let name = root + "/0/event-" + index.to_string();
+        testing::assert_ok(fs::write_file_structured(name, "event"));
+        let events = testing::expect_ok(set.try_read(), "active read");
+        testing::assert(!events.is_empty());
+    }
+    println(
+        count.to_string() + " roots: one active "
+            + (started.elapsed().as_nanoseconds() / 100).to_string()
+            + " ns/write+read",
+    );
+}

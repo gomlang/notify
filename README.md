@@ -29,7 +29,7 @@ are resolved by the ecosystem verifier's isolated local registry.
 
 Build ignore rules with `Options::new().with_ignored_names(Vec::from_array([".git", "node_modules"]))` or `with_ignore((absolute_path: string, is_directory: bool) -> bool)`. Repeated calls combine rules with OR. Name rules match literal basenames at every depth and snapshot the supplied vector; they are not glob patterns. An ignored directory prunes its entire subtree, avoiding recursive watches and scans there. Rules apply to initial discovery, new directories, renames, and overflow recovery, including registrations in `WatchSet` and subscriptions. Moving a visible directory into an ignored path removes its subtree watches; moving it back installs watches and requests a rescan. The root itself and recovery signals are never ignored. Construct options through `new()`; predicates must be stable, quick, and must not call back into their watcher because they run while its state is locked.
 
-`Watcher.try_read() -> Result[Vec[Event], fs::Error]` reads one available batch without waiting for new kernel events. `Watcher.read(timeout: time::Duration)` has the same return type and waits for a nonempty batch, returning an empty vector on timeout. A zero timeout checks immediately. `read_with(cancel: task::CancelToken, timeout)` returns `Result[task::WaitResult[Vec[Event]], fs::Error]`; cancellation returns `Cancelled` and leaves the watcher available. A read that wins a race with cancellation may return `Completed(events)`. Waits check cancellation and close in intervals of at most 50 ms. Timeouts and cancellation bound waiting for kernel events, not directory scans or time spent waiting for another operation to release shared state.
+`Watcher.try_read() -> Result[Vec[Event], fs::Error]` reads one available batch without waiting for new kernel events. `Watcher.read(timeout: time::Duration)` has the same return type and waits for a nonempty batch, returning an empty vector on timeout. A zero timeout checks immediately. `read_with(cancel: task::CancelToken, timeout)` returns `Result[task::WaitResult[Vec[Event]], fs::Error]`; cancellation returns `Cancelled` and leaves the watcher available. A read that wins a race with cancellation may return `Completed(events)`. Waits check cancellation and close in intervals of at most 50 ms. Timeouts bound waiting for kernel events, not directory scans or lock contention. Cancellation also interrupts waiting for the state lock; scans and callbacks already in progress must finish before cancellation can return.
 
 Single-watcher copies share a synchronized handle. Concurrent reads divide the event stream. `close() -> Result[(), fs::Error]` releases the descriptor and all watches and is idempotent; `is_closed()` reports terminal state. Use explicit close or `defer`; garbage collection does not close watchers. A single-file watcher follows the watched inode until a terminal event. Editors commonly replace a file atomically, which ends that file watch; monitor its parent directory and filter event paths when replacement must be followed.
 
@@ -112,11 +112,11 @@ fn monitor_pair(scope: task::Scope, first: string, second: string) -> Result[(),
 }
 ```
 
-Without a subscription, call a reading method regularly: recursive registration and rename maintenance run while consuming kernel events. For an internal directory rename, the watcher matches cookies across read batches and updates descendant paths. While a move is unresolved, events inside that subtree are suppressed to avoid reporting paths outside the root. Unmatched moves expire after 100 ms when the input queue becomes empty. Reusing an old path creates a new subscription to that directory without retaining the moved-out tree. If a directory scan discovers a relocation before its queued rename records have been processed, the library reconciles descriptor paths and requests a root rescan rather than treating that ordinary race as a fatal alias error.
+Without a subscription, call a reading method regularly: recursive registration and rename maintenance run while consuming kernel events. For an internal directory rename, the watcher matches cookies across read batches and updates descendant paths. While a move is unresolved, events inside that subtree are suppressed to avoid reporting paths outside the root. Unmatched moves expire after 100 ms when the input queue becomes empty. Reusing an old path creates a new subscription to that directory without retaining the moved-out tree. If a scan discovers a relocation or a reused path that conflicts with queued events, the library rebuilds the inotify instance and requests a root rescan. Remaining events from the old instance are discarded so they cannot overwrite the recovered paths.
 
 When a single watcher's root moves, is deleted, or is unmounted, the terminal event is returned and the watcher closes; subsequent reads return `InvalidInput`. Errors during decoding or watch maintenance also close that watcher, so failures cannot leave a silently incomplete subscription. Errors retain the operation, path when applicable, and numeric errno; unsupported targets return `Unsupported` during registration. Permission failures and exhausted watch limits are not retried indefinitely.
 
-Inotify does not provide an atomic recursive subscription. Files may change before a newly discovered directory gets its own watch. A directory `CREATE` or `MOVED_TO` event therefore sets `rescan = true`, requesting that the caller refresh that subtree's contents. On `Q_OVERFLOW`, the library recreates the affected inotify descriptor and all its watches, discards the remaining stale batch, and returns a root event with `rescan = true`. A synthetic root event with `mask = 0` and `rescan = true` requests reconciliation after paths were discovered ahead of queued rename records. Applications maintaining a cache must rescan the indicated path, then continue processing queued events. If rebuilding fails, the registration closes and reports an error. Initial registration similarly requires the caller's own scan if an initial snapshot is needed.
+Inotify does not provide an atomic recursive subscription. Files may change before a newly discovered directory gets its own watch. A directory `CREATE` or `MOVED_TO` event therefore sets `rescan = true`, requesting that the caller refresh that subtree's contents. On `Q_OVERFLOW`, the library recreates the affected inotify descriptor and all its watches, discards the remaining stale batch, and returns a root event with `rescan = true`. A synthetic root event with `mask = 0` and `rescan = true` requests reconciliation after conflicting path identities caused a rebuild. Applications maintaining a cache must rescan the indicated path, then continue processing queued events. If rebuilding fails, the registration closes and reports an error. Initial registration similarly requires the caller's own scan if an initial snapshot is needed.
 
 Notifications may be coalesced, and paths can change again before events are consumed; they are not an audit log. Non-UTF-8 event names produce `InvalidData` rather than replacement characters, consistent with the standard library's UTF-8 path API. Network-filesystem remote changes, mounts placed over watched paths, and memory-mapped writes have the underlying [inotify limitations](https://man7.org/linux/man-pages/man7/inotify.7.html). This API uses ordinary imports, structs, functions, and methods; no grammar changes are introduced.
 
@@ -125,8 +125,19 @@ while waiting for another operation to release the state lock. Cancellation is
 checked again after each read/poll step, so an elapsed timeout cannot turn an
 already observed cancellation into a completed empty batch. Kernel polling is
 still bounded to 50 ms per step; user ignore callbacks must return to allow
-cancellation of an operation already executing them. A cancelled read may have
-drained a racing event batch; callers should rescan when abandoning a read.
+cancellation of an operation already executing them. When cancellation wins after
+a batch was read, that batch is retained under the state lock and delivered by the
+next reading call before newer kernel events. Repeated cancelled calls leave it
+available. Cancellation after delivery was committed may return `Completed`.
+Read and maintenance errors are returned as errors even if cancellation races
+with them. A retained terminal batch remains readable after `is_closed()` becomes
+true; explicit `close()` discards any retained batch.
+
+For multiple registrations, `WatchSet` polls descriptors together and reads only
+ready queues. Idle registrations still expire pending moves. The poll buffer is
+reused, and descriptor failures produce registration-local `Error` and `Removed`
+notices. A set with one registration reads directly without an extra readiness
+syscall.
 
 Panics from ignore callbacks propagate. During recursive registration, unwinding
 closes the newly allocated inotify instance. After a subscription takes ownership,
@@ -137,33 +148,44 @@ Synchronous reads without a subscription still leave ownership with the caller.
 
 ## Validation
 
-From the repository root:
+Requires GoML 0.1.56 or newer on Linux amd64. The downstream example verifier
+also needs Go 1.26 or newer on `PATH`. From a standalone clone:
 
 ```sh
-(cd ../verification && just ecosystem-test notify)
+goml test --timeout 120s
+goml verify --timeout 300s
+# Match the race detection used by CI:
+GOFLAGS=-race goml test --timeout 120s
 ```
 
-The `examples/basic` example preserves the complete former compiler regression
-fixture and exercises the public API. `goml verify` also tests it through an
-isolated registry snapshot. The module retains all 22 original internal tests and adds 8 public-API
-tests for filesystem boundaries and resource lifecycle. The GoML verifier compiles
-the generated library and example test runners with Go's race detector and runs
-the same real-filesystem cases. Tests create unique temporary directories and
-remove them after each run; no external service or privileged mount is required.
+The internal and public API tests cover filesystem boundaries and resource
+lifecycle. The `examples/basic` example preserves the former compiler regression
+fixture; `goml verify` also tests it through an isolated registry snapshot.
+Tests create unique temporary directories and remove them after each run; no
+external service or privileged mount is required. With the sibling ecosystem
+verification checkout available, `(cd ../verification && just ecosystem-test notify)`
+additionally runs its smoke and compatibility checks.
 
 Coverage includes real inotify queue overflow and rebuild, cross-batch rename
 cookies, recursive move-in/out and ignored subtree maintenance, malformed record
 decoding, raw non-UTF-8 filenames, cancellable reads, unbuffered subscription
-backpressure, concurrent close and descriptor release.
+backpressure, concurrent close and descriptor release. Regression cases cover
+directory path reuse across event batches, retained cancelled reads, terminal
+batch delivery, idle move expiry and per-registration polling failures.
 
 ## Development and examples
 
-Requires GoML 0.1.56 or newer. The `examples/basic/` example shares the root manifest and its dependencies. From the library root, run:
+Examples share the root manifest. From the library root, run:
 
 ```sh
+goml run --example watch -- /path/to/directory
 goml run --example basic
-goml test
-goml verify --timeout 300s
+goml run --example watch_set_bench
 ```
 
-`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test notify)` also retains the library-specific smoke and compatibility checks.
+`watch` is a minimal recursive monitor and defaults to the current directory.
+`basic` runs the compatibility fixture. `watch_set_bench` measures idle polling
+and one active root among 1, 16 and 64 registrations; setup is excluded from
+timings and no machine-dependent timing threshold is asserted. Compare results
+on the same host and toolchain. `goml test` builds every example and runs its
+tests; `goml verify` repeats those checks against an isolated registry snapshot.

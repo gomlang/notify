@@ -8,6 +8,50 @@ use std::testing;
 use std::time;
 
 #[test]
+fn cancelled_terminal_batch_remains_readable_until_explicit_close() -> () {
+    for explicit_close in Vec::from_array([false, true]) {
+        let root = directory("cancel-terminal");
+        task::scope(
+            |scope| {
+                let watcher = testing::expect_ok(
+                    notify::watch_with(
+                        root,
+                        notify::Options::new().with_ignore(
+                            |_, _| {
+                                scope.cancel();
+                                false
+                            },
+                        ),
+                    ),
+                    "watch",
+                );
+                defer {
+                    let _ = watcher.close();
+                };
+                write(root + "/file");
+                testing::assert_ok(fs::remove_dir_all(root));
+                match testing::expect_ok(
+                    watcher.read_with(scope.token(), time::Duration::zero()),
+                    "read",
+                ) {
+                    task::WaitResult::Cancelled => (),
+                    task::WaitResult::Completed(_) => testing::fail("read must cancel"),
+                }
+                testing::assert(watcher.is_closed());
+                if explicit_close {
+                    testing::assert_ok(watcher.close());
+                    testing::assert_err(watcher.try_read());
+                } else {
+                    let events = testing::expect_ok(watcher.try_read(), "retained terminal batch");
+                    testing::assert(observed(events, root, notify::DELETE_SELF));
+                    testing::assert_err(watcher.try_read());
+                }
+            },
+        );
+    }
+}
+
+#[test]
 fn cancellation_from_ignore_callback_prevents_completed_batch() -> () {
     let root = directory("callback-cancel");
     defer {
@@ -41,6 +85,13 @@ fn cancellation_from_ignore_callback_prevents_completed_batch() -> () {
                 ),
             }
             testing::assert(!watcher.is_closed());
+            write(root + "/later");
+            let retained = testing::expect_ok(watcher.try_read(), "retained cancelled batch");
+            testing::assert(observed(retained, root + "/first", notify::CREATE));
+            testing::assert(!observed(retained, root + "/later", notify::CREATE));
+            let next = testing::expect_ok(watcher.try_read(), "new batch follows retained batch");
+            testing::assert(observed(next, root + "/later", notify::CREATE));
+            testing::assert(!observed(next, root + "/first", notify::CREATE));
         },
     );
     task::scope(
@@ -71,6 +122,17 @@ fn cancellation_from_ignore_callback_prevents_completed_batch() -> () {
                 ),
             }
             testing::assert(!watches.is_closed());
+            let retained = testing::expect_ok(watches.try_read(), "retained notices");
+            let mut found = false;
+            for notice in retained {
+                if let notify::Notice::Event(_, event) = notice {
+                    if event.path == root + "/second" && event.has(notify::CREATE) {
+                        found = true;
+                    }
+                }
+            }
+            testing::assert(found);
+            testing::assert(testing::expect_ok(watches.try_read(), "delivered once").is_empty());
         },
     );
 }

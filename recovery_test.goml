@@ -1,0 +1,111 @@
+package notify;
+
+use std::fs;
+use std::testing;
+use std::time;
+
+#[test]
+fn path_identity_conflicts_across_batches_rebuild_and_discard_stale_events() -> () {
+    let root = temporary("identity-conflict");
+    defer testing::assert_ok(fs::remove_dir_all(root));
+    let state = testing::expect_ok(open_state(root, Options::new().with_recursive(true)), "watch");
+    defer testing::assert_ok(close_state(state));
+    let root_wd = wd_for(state, root);
+    testing::assert_ok(fs::create_dir_all(root + "/a/deep"));
+    testing::assert_ok(fs::rename(root + "/a", root + "/b"));
+    testing::assert_ok(fs::create_dir_all(root + "/a/deep"));
+    testing::assert_ok(
+        process_events(
+            state,
+            Vec::from_array(
+                [raw(root_wd, CREATE | IS_DIR, 0, "a"), raw(root_wd, MOVED_FROM | IS_DIR, 42, "a")],
+            ),
+        ),
+    );
+    let events = testing::expect_ok(
+        process_events(
+            state,
+            Vec::from_array(
+                [raw(root_wd, MOVED_TO | IS_DIR, 42, "b"), raw(root_wd, CREATE, 0, "stale-event")],
+            ),
+        ),
+        "recovery",
+    );
+    let mut recovered = false;
+    for event in events {
+        testing::assert(event.path != root + "/stale-event");
+        if event.path == root && event.rescan {
+            recovered = true;
+        }
+    }
+    testing::assert(recovered);
+    testing::assert_eq(state.watches.len(), 5);
+    testing::assert_eq(state.paths.len(), state.watches.len());
+    testing::assert_eq(state.moves.len(), 0);
+    for (wd, name) in state.watches.entries() {
+        testing::assert(state.paths[name] == Option::Some(wd));
+    }
+    let name = root + "/b/deep/after";
+    testing::assert_ok(fs::write_file_structured(name, "data"));
+    let events = testing::expect_ok(read_batch(state), "after recovery");
+    testing::assert(!events.is_empty());
+    for event in events {
+        testing::assert_eq(event.path, name);
+    }
+}
+
+#[test]
+fn watch_set_poll_failures_remove_only_the_failed_registration() -> () {
+    let root = temporary("poll-failure");
+    defer testing::assert_ok(fs::remove_dir_all(root));
+    let set = WatchSet::new();
+    defer testing::assert_ok(set.close());
+    let bad = testing::expect_ok(set.add(root), "bad registration");
+    let good = testing::expect_ok(set.add(root), "good registration");
+    let state = testing::expect_some(set.state.recv(), "state");
+    let registration = testing::expect_some(state.registrations[bad], "registration");
+    testing::assert_ok(close_fd(testing::expect_some(registration.state.fd.get(), "fd")));
+    set.state.send(state);
+    let notices = testing::expect_ok(set.read(time::Duration::from_seconds(1)), "isolated failure");
+    testing::assert_eq(notices.len(), 2);
+    match notices[0] {
+        Notice::Error(id, _) => testing::assert(id == bad),
+        _ => testing::fail("missing registration error"),
+    }
+    match notices[1] {
+        Notice::Removed(id) => testing::assert(id == bad),
+        _ => testing::fail("missing removal"),
+    }
+    testing::assert_eq(testing::expect_ok(set.watches(), "survivor").len(), 1);
+    testing::assert_ok(fs::write_file_structured(root + "/after", "data"));
+    testing::assert(
+        has_notice(
+            testing::expect_ok(set.try_read(), "surviving events"),
+            good,
+            root + "/after",
+            CREATE,
+        ),
+    );
+}
+
+#[test]
+fn idle_watch_set_polling_expires_moved_out_subtrees() -> () {
+    let root = temporary("poll-expiry");
+    defer testing::assert_ok(fs::remove_dir_all(root));
+    testing::assert_ok(fs::create_dir_all(root + "/watched/child/deep"));
+    testing::assert_ok(fs::create_dir(root + "/idle"));
+    let set = WatchSet::new();
+    defer testing::assert_ok(set.close());
+    let id = testing::expect_ok(set.add_recursive(root + "/watched"), "recursive root");
+    testing::assert_ok(set.add(root + "/idle"));
+    testing::assert_ok(fs::rename(root + "/watched/child", root + "/outside"));
+    testing::assert_ok(set.try_read());
+    time::sleep(time::Duration::from_milliseconds(110));
+    testing::assert_ok(set.try_read());
+    let state = testing::expect_some(set.state.recv(), "state");
+    defer set.state.send(state);
+    let registration = testing::expect_some(state.registrations[id], "registration");
+    testing::assert_eq(registration.state.moves.len(), 0);
+    testing::assert_eq(registration.state.watches.len(), 1);
+    testing::assert_eq(registration.state.paths.len(), 1);
+}

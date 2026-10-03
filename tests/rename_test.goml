@@ -1,0 +1,38 @@
+package tests;
+
+use ecosystem::notify;
+use std::fs;
+use std::testing;
+use std::time;
+
+#[test]
+fn reused_directory_paths_keep_events_in_the_correct_subtree() -> () {
+    let root = directory("rename-reuse");
+    defer {
+        let _ = fs::remove_dir_all(root);
+    };
+    let watcher = testing::expect_ok(notify::watch_recursive(root), "watch");
+    defer {
+        let _ = watcher.close();
+    };
+    testing::assert_ok(fs::create_dir_all(root + "/a/deep"));
+    testing::assert_ok(fs::rename(root + "/a", root + "/b"));
+    testing::assert_ok(fs::create_dir_all(root + "/a/deep"));
+    let topology = testing::expect_ok(watcher.try_read(), "topology");
+    let mut rescan = false;
+    for event in topology {
+        if event.path == root && event.rescan {
+            rescan = true;
+        }
+    }
+    testing::assert(rescan);
+    for subtree in Vec::from_array(["a", "b"]) {
+        let name = root + "/" + subtree + "/deep/probe";
+        write(name);
+        let events = testing::expect_ok(watcher.read(time::Duration::from_seconds(1)), "probe");
+        testing::assert(observed(events, name, notify::CREATE));
+        for event in events {
+            testing::assert_eq(event.path, name);
+        }
+    }
+}

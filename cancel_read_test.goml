@@ -1,8 +1,79 @@
 package notify;
 
 use std::task;
+use std::io;
+use std::fs;
 use std::testing;
 use std::time;
+
+#[test]
+fn read_errors_are_not_hidden_by_racing_cancellation() -> () {
+    task::scope(
+        |scope| {
+            let gate: Channel[()] = Channel::new(1);
+            let result: Result[task::WaitResult[Vec[isize]], fs::Error] = read_step(
+                gate,
+                (),
+                scope.token(),
+                time::Instant::now(),
+                time::Duration::zero(),
+                |_| {
+                    scope.cancel();
+                    Result::Err(error(io::ErrorKind::InvalidData, "failed read"))
+                },
+                |_, _| Result::Ok(()),
+                |_, _| testing::fail("an error must not retain an event batch"),
+            );
+            testing::assert_eq(
+                testing::expect_err(result, "read error").kind(),
+                io::ErrorKind::InvalidData,
+            );
+            testing::assert_some(gate.recv());
+        },
+    );
+}
+
+#[test]
+fn cancellation_during_the_post_poll_read_retains_its_batch() -> () {
+    task::scope(
+        |scope| {
+            let gate: Channel[()] = Channel::new(1);
+            let ready = Ref::new(false);
+            let retained = Ref::new(Option::None);
+            let result = testing::expect_ok(
+                read_step(
+                    gate,
+                    (),
+                    scope.token(),
+                    time::Instant::now(),
+                    time::Duration::from_seconds(1),
+                    |_| {
+                        if ready.get() {
+                            scope.cancel();
+                            Result::Ok(Vec::from_array([7]))
+                        } else {
+                            Result::Ok(Vec::new())
+                        }
+                    },
+                    |_, _| {
+                        ready.set(true);
+                        Result::Ok(())
+                    },
+                    |_, events| retained.set(Option::Some(events)),
+                ),
+                "cancelled post-poll read",
+            );
+            match result {
+                task::WaitResult::Cancelled => (),
+                task::WaitResult::Completed(_) => testing::fail("read must cancel"),
+            }
+            testing::assert(
+                testing::expect_some(retained.get(), "retained events") == Vec::from_array([7]),
+            );
+            testing::assert_some(gate.recv());
+        },
+    );
+}
 
 #[test]
 fn watcher_read_cancellation_does_not_wait_for_state_lock() -> () {
@@ -110,10 +181,16 @@ fn poll_readiness_is_drained_in_the_same_step() -> () {
                         ready.set(true);
                         Result::Ok(())
                     },
+                    |_, _| testing::fail("completed read must not retain events"),
                 ),
                 "ready after poll",
             );
-            testing::assert(events == Vec::from_array([7]));
+            match events {
+                task::WaitResult::Completed(values) => testing::assert(
+                    values == Vec::from_array([7]),
+                ),
+                task::WaitResult::Cancelled => testing::fail("ready read was cancelled"),
+            }
             testing::assert_some(gate.recv());
         },
     );

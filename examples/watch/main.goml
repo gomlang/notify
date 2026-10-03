@@ -1,0 +1,37 @@
+package main;
+
+use ecosystem::notify;
+use std::env;
+use std::fs;
+use std::io;
+use std::time;
+
+fn main() -> () {
+    let args = env::args();
+    let root = if args.len() > 1 {
+        args[1]
+    } else {
+        "."
+    };
+    if let Err(error) = monitor(root) {
+        io::eprintln(error.to_string());
+    }
+}
+
+fn monitor(root: string) -> Result[(), fs::Error] {
+    let watcher = notify::watch_recursive(root)?;
+    defer {
+        let _ = watcher.close();
+    };
+    println("Watching " + root + " (Ctrl-C to stop)");
+    while !watcher.is_closed() {
+        for event in watcher.read(time::Duration::from_seconds(1))? {
+            if event.rescan {
+                println("rescan " + event.path);
+            } else {
+                println(event.mask.to_string() + " " + event.path);
+            }
+        }
+    }
+    Result::Ok(())
+}

@@ -68,10 +68,12 @@ fn open_state(root: string, options: Options) -> Result[State, fs::Error] {
         recursive: options.recursive,
         options,
         watches: HashMap::new(),
+        paths: HashMap::new(),
         moves: HashMap::new(),
         buffer: zeroes(65536),
         rescan: Ref::new(false),
         close_requested: Ref::new(false),
+        pending: Ref::new(Option::None),
     };
     let retained = Ref::new(false);
     defer {
@@ -155,6 +157,7 @@ impl Watcher {
                     },
                 }
             },
+            |state, events| state.pending.set(Option::Some(events)),
         )
     }
 
@@ -211,23 +214,23 @@ fn read_with_state[S, T](
     timeout: time::Duration,
     read: (S) -> Result[Vec[T], fs::Error],
     wait: (S, usize) -> Result[(), fs::Error],
+    retain: (S, Vec[T]) -> (),
 ) -> Result[task::WaitResult[Vec[T]], fs::Error] {
     let started = time::Instant::now();
     loop {
         if cancel.is_cancelled() {
-            return Result::Ok(task::WaitResult::Cancelled)
+            return Result::Ok(task::WaitResult::Cancelled);
         }
         let state = select {
             recv(cancel.done()) as _ => return Result::Ok(task::WaitResult::Cancelled),
             recv(gate) as state => state.ok_or(closed())?,
         };
-        let result = read_step(gate, state, cancel, started, timeout, read, wait);
-        if cancel.is_cancelled() {
-            return Result::Ok(task::WaitResult::Cancelled)
-        }
-        let events = result?;
+        let events = match read_step(gate, state, cancel, started, timeout, read, wait, retain)? {
+            task::WaitResult::Cancelled => return Result::Ok(task::WaitResult::Cancelled),
+            task::WaitResult::Completed(events) => events,
+        };
         if !events.is_empty() || started.elapsed().compare(timeout) >= 0 {
-            return Result::Ok(task::WaitResult::Completed(events))
+            return Result::Ok(task::WaitResult::Completed(events));
         }
     }
 }
@@ -240,12 +243,13 @@ fn read_step[S, T](
     timeout: time::Duration,
     read: (S) -> Result[Vec[T], fs::Error],
     wait: (S, usize) -> Result[(), fs::Error],
-) -> Result[Vec[T], fs::Error] {
+    retain: (S, Vec[T]) -> (),
+) -> Result[task::WaitResult[Vec[T]], fs::Error] {
     defer gate.send(state);
     if cancel.is_cancelled() {
-        return Result::Ok(Vec::new())
+        return Result::Ok(task::WaitResult::Cancelled);
     }
-    let events = read(state)?;
+    let mut events = read(state)?;
     let remaining = timeout.saturating_subtract(started.elapsed());
     if events.is_empty() && !remaining.is_zero() && !cancel.is_cancelled() {
         let milliseconds = if remaining.as_nanoseconds() >= 50000000 {
@@ -255,9 +259,16 @@ fn read_step[S, T](
         };
         wait(state, milliseconds.to_usize())?;
         if cancel.is_cancelled() {
-            return Result::Ok(Vec::new())
+            return Result::Ok(task::WaitResult::Cancelled);
         }
-        return read(state)
+        events = read(state)?;
     }
-    Result::Ok(events)
+    if cancel.is_cancelled() {
+        if !events.is_empty() {
+            retain(state, events);
+        }
+        Result::Ok(task::WaitResult::Cancelled)
+    } else {
+        Result::Ok(task::WaitResult::Completed(events))
+    }
 }

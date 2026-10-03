@@ -16,18 +16,24 @@ struct State {
     recursive: bool,
     options: Options,
     watches: HashMap[i32, string],
+    paths: HashMap[string, i32],
     moves: HashMap[u32, PendingMove],
     buffer: Vec[byte],
     rescan: Ref[bool],
     close_requested: Ref[bool],
+    pending: Ref[Option[Vec[Event]]],
 }
 
 fn close_state(state: State) -> Result[(), fs::Error] {
     let fd = state.fd.get();
     state.fd.set(Option::None);
     state.rescan.set(false);
+    state.pending.set(Option::None);
     for (wd, _) in state.watches.entries() {
         state.watches.remove(wd);
+    }
+    for (name, _) in state.paths.entries() {
+        state.paths.remove(name);
     }
     for (cookie, _) in state.moves.entries() {
         state.moves.remove(cookie);
@@ -70,24 +76,25 @@ fn add_tree(state: State, root: string, required: bool) -> Result[(), fs::Error]
             continue;
         }
         visited.insert(wd, true);
+        // A scan sees the current filesystem, while queued events describe its past.
+        // Conflicting identities require a fresh queue, not a path-only rename.
+        if let Some(previous) = state.paths[directory] {
+            if previous != wd {
+                state.rescan.set(true);
+                return Result::Ok(());
+            }
+        }
         if let Some(previous) = state.watches[wd] {
             if previous != directory {
                 if within(directory, previous) || within(previous, directory) {
                     continue;
                 }
-                let was_pending = suspended(state, previous);
-                for (cookie, moved) in state.moves.entries() {
-                    if within(moved.path, previous) {
-                        state.moves.remove(cookie);
-                    }
-                }
-                rename_tree(state, previous, directory)?;
-                if !was_pending {
-                    state.rescan.set(true);
-                }
+                state.rescan.set(true);
+                return Result::Ok(());
             }
         }
         state.watches.insert(wd, directory);
+        state.paths.insert(directory, wd);
         if !state.recursive {
             continue;
         }
@@ -144,6 +151,7 @@ fn remove_tree(state: State, directory: string) -> Result[(), fs::Error] {
     for (wd, name) in state.watches.entries() {
         if within(name, directory) {
             state.watches.remove(wd);
+            state.paths.remove(name);
             remove_watch(fd, wd)?;
         }
     }
@@ -162,7 +170,10 @@ fn rename_tree(state: State, from: string, to: string) -> Result[(), fs::Error] 
     remove_tree(state, to)?;
     for (wd, name) in state.watches.entries() {
         if within(name, from) {
-            state.watches.insert(wd, to + name.byte_slice(from.byte_len(), name.byte_len()));
+            let renamed = to + name.byte_slice(from.byte_len(), name.byte_len());
+            state.paths.remove(name);
+            state.watches.insert(wd, renamed);
+            state.paths.insert(renamed, wd);
         }
     }
     for (cookie, pending) in state.moves.entries() {
@@ -210,6 +221,11 @@ fn rebuild(state: State) -> Result[(), fs::Error] {
 
 fn process_events(state: State, records: Vec[RawEvent]) -> Result[Vec[Event], fs::Error] {
     let result = Vec::new();
+    if state.rescan.get() {
+        rebuild(state)?;
+        result.push(Event { path: state.root, mask: 0, cookie: 0, rescan: true });
+        return Result::Ok(result);
+    }
     for record in records {
         if record.mask & Q_OVERFLOW != 0 {
             rebuild(state)?;
@@ -222,6 +238,7 @@ fn process_events(state: State, records: Vec[RawEvent]) -> Result[Vec[Event], fs
         };
         if record.mask & IGNORED != 0 {
             state.watches.remove(record.wd);
+            state.paths.remove(directory);
         }
         if suspended(state, directory) {
             continue;
@@ -265,20 +282,25 @@ fn process_events(state: State, records: Vec[RawEvent]) -> Result[Vec[Event], fs
         if visible_event(state, event) {
             result.push(event);
         }
+        if state.rescan.get() {
+            rebuild(state)?;
+            result.push(Event { path: state.root, mask: 0, cookie: 0, rescan: true });
+            break;
+        }
         if record.name == "" && directory == state.root
             && record.mask & (DELETE_SELF | MOVE_SELF | UNMOUNT | IGNORED) != 0 {
             close_state(state)?;
             break;
         }
     }
-    if state.rescan.get() {
-        state.rescan.set(false);
-        result.push(Event { path: state.root, mask: 0, cookie: 0, rescan: true });
-    }
     Result::Ok(result)
 }
 
 fn read_batch(state: State) -> Result[Vec[Event], fs::Error] {
+    if let Some(events) = state.pending.get() {
+        state.pending.set(Option::None);
+        return Result::Ok(events);
+    }
     let records = read_kernel(state)?;
     if records.len() == 0 {
         expire_moves(state)?;
