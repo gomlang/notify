@@ -23,6 +23,13 @@ are resolved by the ecosystem verifier's isolated local registry.
 
 `ecosystem::notify` implements filesystem notifications in GoML using `std::os::linux::syscall` and Linux inotify. The supported target is Linux amd64. `watch(path: string)` watches one file or a directory and its immediate entries. `watch_recursive(path: string)` requires a directory, watches existing descendants, and adds watches when directories are created or moved into the tree. Both return `Result[Watcher, fs::Error]`. Descendant symbolic links are not traversed, and a symbolic link as the root is rejected. Directory aliases through bind mounts are unsupported.
 
+Root paths preserve intermediate components for kernel resolution: `link/../tree`
+follows `link` before resolving `..`. Event paths retain these components so they
+name the watched entries. Missing or non-directory intermediate components remain
+errors. Final `/` and `/.` directory suffixes are validated before removal;
+`regular-file/.` stays invalid, and `link/` or `link/.` cannot bypass root symlink
+rejection.
+
 `watch_with(path, options: Options)` configures a single watcher. `Options::new()` uses `recursive = false` and `mask = CHANGES`; `with_recursive(bool)` and `with_mask(u32)` return adjusted options. Both fields are public. A requested mask must be a nonempty subset of `ALL_EVENTS`. The available request bits are `ACCESS`, `MODIFY`, `ATTRIB`, `CLOSE_WRITE`, `CLOSE_NOWRITE`, `OPEN`, `MOVED_FROM`, `MOVED_TO`, `CREATE`, `DELETE`, `DELETE_SELF`, and `MOVE_SELF`. `CHANGES` includes these except `ACCESS`, `CLOSE_NOWRITE`, and `OPEN`. Recursive directory topology events, root lifecycle events, and recovery notifications are always delivered even when excluded by the requested filter, so filtering cannot disable recursive maintenance.
 
 `Event` has public `path: string`, `mask: u32`, `cookie: u32`, and `rescan: bool` fields. Paths are absolute. `has(mask)` tests whether any requested mask bit is present, and `is_dir()` tests `IS_DIR`. In addition to requested event bits, masks may contain `UNMOUNT`, `Q_OVERFLOW`, `IGNORED`, or `IS_DIR`. Matching nonzero cookies connect `MOVED_FROM` and `MOVED_TO` events within a registration; cookies are not persistent object identities.

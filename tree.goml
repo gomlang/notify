@@ -2,7 +2,6 @@ package notify;
 
 use std::fs;
 use std::io;
-use std::path;
 use std::time;
 
 struct PendingMove {
@@ -22,6 +21,14 @@ struct State {
     rescan: Ref[bool],
     close_requested: Ref[bool],
     pending: Ref[Option[Vec[Event]]],
+}
+
+fn child_path(parent: string, child: string) -> string {
+    if parent.ends_with("/") {
+        parent + child
+    } else {
+        parent + "/" + child
+    }
 }
 
 fn close_state(state: State) -> Result[(), fs::Error] {
@@ -117,7 +124,7 @@ fn add_tree(state: State, root: string, required: bool) -> Result[(), fs::Error]
             },
         };
         for name in names {
-            let child = path::join(directory, name);
+            let child = child_path(directory, name);
             match fs::symlink_metadata(child) {
                 Ok(metadata) => {
                     if metadata.file_type().is_dir() {
@@ -246,7 +253,7 @@ fn process_events(state: State, records: Vec[RawEvent]) -> Result[Vec[Event], fs
         let name = if record.name == "" {
             directory
         } else {
-            path::join(directory, record.name)
+            child_path(directory, record.name)
         };
         let is_dir = record.mask & IS_DIR != 0;
         let exclude = ignored(state, name, is_dir);

@@ -1,0 +1,115 @@
+package tests;
+
+use ecosystem::notify;
+use std::fs;
+use std::testing;
+use std::time;
+
+#[test]
+fn root_path_components_determine_kernel_watches_and_event_paths() -> () {
+    let outer = directory("path-resolution");
+    defer {
+        let _ = fs::remove_dir_all(outer);
+    };
+    testing::assert_ok(fs::create_dir_all(outer + "/real/anchor"));
+    testing::assert_ok(fs::create_dir_all(outer + "/real/watched/nested"));
+    testing::assert_ok(fs::create_dir_all(outer + "/watched/nested"));
+    testing::assert_ok(fs::symbolic_link(outer + "/real/anchor", outer + "/link"));
+    let root = outer + "/link/../watched";
+    let mut index = 0;
+    for recursive in Vec::from_array([false, true]) {
+        for suffix in Vec::from_array(["", "/", "/."]) {
+            let watcher = testing::expect_ok(
+                notify::watch_with(root + suffix, notify::Options::new().with_recursive(recursive)),
+                "watch root",
+            );
+            defer {
+                let _ = watcher.close();
+            };
+            let name = "created-" + index.to_string();
+            write(outer + "/real/watched/" + name);
+            let events = testing::expect_ok(
+                watcher.read(time::Duration::from_seconds(1)),
+                "root events",
+            );
+            testing::assert(observed(events, root + "/" + name, notify::CREATE));
+            if recursive {
+                write(outer + "/real/watched/nested/" + name);
+                let events = testing::expect_ok(
+                    watcher.read(time::Duration::from_seconds(1)),
+                    "nested events",
+                );
+                testing::assert(observed(events, root + "/nested/" + name, notify::CREATE));
+                let child = "new-" + index.to_string();
+                testing::assert_ok(fs::create_dir(outer + "/real/watched/" + child));
+                let events = testing::expect_ok(
+                    watcher.read(time::Duration::from_seconds(1)),
+                    "new directory",
+                );
+                testing::assert(observed(events, root + "/" + child, notify::CREATE));
+                write(outer + "/real/watched/" + child + "/note");
+                let events = testing::expect_ok(
+                    watcher.read(time::Duration::from_seconds(1)),
+                    "new descendant",
+                );
+                testing::assert(observed(events, root + "/" + child + "/note", notify::CREATE));
+                testing::assert_ok(
+                    fs::rename(
+                        outer + "/real/watched/" + child,
+                        outer + "/real/watched/" + child + "-moved",
+                    ),
+                );
+                let events = testing::expect_ok(
+                    watcher.read(time::Duration::from_seconds(1)),
+                    "renamed directory",
+                );
+                testing::assert(observed(events, root + "/" + child + "-moved", notify::MOVED_TO));
+                write(outer + "/real/watched/" + child + "-moved/after");
+                let events = testing::expect_ok(
+                    watcher.read(time::Duration::from_seconds(1)),
+                    "renamed descendant",
+                );
+                testing::assert(
+                    observed(events, root + "/" + child + "-moved/after", notify::CREATE),
+                );
+            }
+            testing::assert_ok(watcher.close());
+            index += 1;
+        }
+    }
+}
+
+#[test]
+fn root_path_invalid_components_and_suffixes_do_not_bypass_validation() -> () {
+    let outer = directory("path-errors");
+    defer {
+        let _ = fs::remove_dir_all(outer);
+    };
+    write(outer + "/regular");
+    testing::assert_ok(fs::create_dir(outer + "/directory"));
+    testing::assert_ok(fs::symbolic_link(outer + "/directory", outer + "/link"));
+    for name in Vec::from_array(
+        [
+            "missing/..",
+            "regular/..",
+            "missing/.",
+            "regular/.",
+            "regular/",
+            "link",
+            "link/",
+            "link/.",
+            "link/././",
+        ],
+    ) {
+        for recursive in Vec::from_array([false, true]) {
+            let result = notify::watch_with(
+                outer + "/" + name,
+                notify::Options::new().with_recursive(recursive),
+            );
+            if let Ok(watcher) = result {
+                testing::assert_ok(watcher.close());
+            }
+            testing::assert_err(result);
+        }
+    }
+}
