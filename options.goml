@@ -31,7 +31,10 @@ impl Options {
     }
 
     pub fn with_ignored_names(self: Options, names: Vec[string]) -> Options {
-        let snapshot = names.as_slice().to_vec();
+        let snapshot: HashMap[string, bool] = HashMap::new();
+        for name in names {
+            snapshot.insert(name, true);
+        }
         self.with_ignore(
             |name, _| match path::file_name(name) {
                 Some(value) => snapshot.contains(value),
