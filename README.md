@@ -157,7 +157,7 @@ Synchronous reads without a subscription still leave ownership with the caller.
 
 ## Validation
 
-Requires the source-built GoML toolchain with unversioned registry support pinned in [verification/ci/toolchain.json](https://github.com/gomlang/verification/blob/main/ci/toolchain.json) on Linux amd64. The downstream example verifier
+Requires the source-built GoML toolchain with unversioned registry support pinned in [workflows/ci/toolchain.json](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json) on Linux amd64. The downstream example verifier
 also needs Go 1.26 or newer on `PATH`. From a standalone clone:
 
 ```sh
@@ -171,7 +171,7 @@ lifecycle. The `examples/basic` example preserves the former compiler regression
 fixture; the ecosystem verification runner also tests it through an isolated registry snapshot.
 Tests create unique temporary directories and remove them after each run; no
 external service or privileged mount is required. With the sibling ecosystem
-verification checkout available, `(cd ../verification && just ecosystem-test notify)`
+verification checkout available, `(cd ../workflows && just ecosystem-test notify)`
 additionally runs its smoke and compatibility checks.
 
 Coverage includes real inotify queue overflow and rebuild, cross-batch rename
