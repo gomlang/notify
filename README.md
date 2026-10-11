@@ -12,8 +12,10 @@ Declare the dependency in your module-root `goml.toml`:
 
 ```toml
 [dependencies]
-"ecosystem::notify" = "0.1.0"
+"ecosystem::notify" = true
 ```
+
+GoML dependencies are unversioned: `true` tracks each package repository’s default branch.
 
 Replace `use std::fs::notify;` with `use ecosystem::notify;`. Existing calls and
 public types retain their names and signatures. Source archives in this repository
@@ -155,19 +157,18 @@ Synchronous reads without a subscription still leave ownership with the caller.
 
 ## Validation
 
-Requires GoML 0.1.56 or newer on Linux amd64. The downstream example verifier
+Requires the source-built GoML toolchain with unversioned registry support pinned in [verification/ci/toolchain.json](https://github.com/gomlang/verification/blob/main/ci/toolchain.json) on Linux amd64. The downstream example verifier
 also needs Go 1.26 or newer on `PATH`. From a standalone clone:
 
 ```sh
 goml test --timeout 120s
-goml verify --timeout 300s
 # Match the race detection used by CI:
 GOFLAGS=-race goml test --timeout 120s
 ```
 
 The internal and public API tests cover filesystem boundaries and resource
 lifecycle. The `examples/basic` example preserves the former compiler regression
-fixture; `goml verify` also tests it through an isolated registry snapshot.
+fixture; the ecosystem verification runner also tests it through an isolated registry snapshot.
 Tests create unique temporary directories and remove them after each run; no
 external service or privileged mount is required. With the sibling ecosystem
 verification checkout available, `(cd ../verification && just ecosystem-test notify)`
@@ -195,4 +196,4 @@ goml run --example watch_set_bench
 and one active root among 1, 16 and 64 registrations; setup is excluded from
 timings and no machine-dependent timing threshold is asserted. Compare results
 on the same host and toolchain. `goml test` builds every example and runs its
-tests; `goml verify` repeats those checks against an isolated registry snapshot.
+tests; the ecosystem verification runner repeats those checks against an isolated registry snapshot.
