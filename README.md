@@ -2,7 +2,7 @@
 
 A GoML library extracted from the former `std::fs::notify` package. The public
 API and Linux amd64 behavior are preserved; the import and dependency coordinate
-now belong to the ecosystem. It uses the published GoML 0.1.50 standard library,
+now belong to the ecosystem. It uses the GoML standard library,
 including public `std::os::linux::syscall`, without compiler or private runtime
 imports, generated native bindings, or additional host libraries.
 
